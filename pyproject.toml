@@ -17,7 +17,7 @@ examples = ["matplotlib>=3.8"]
 cia = "code_interpreter_agent.cli.main:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6", "matplotlib>=3.8", "numpy>=1.26"]
+dev = ["pytest>=8", "ruff>=0.6", "matplotlib>=3.8", "numpy>=1.26", "streamlit>=1.40"]
 
 [build-system]
 requires = ["hatchling"]
