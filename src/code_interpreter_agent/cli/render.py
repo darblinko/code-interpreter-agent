@@ -9,8 +9,9 @@ from typing import TextIO
 from ..agent import Event, FinalEvent, TextDelta, ToolCallEvent, ToolResultEvent
 
 
-def render_events(events: Iterable[Event], out: TextIO = sys.stdout, verbose: bool = True) -> str:
+def render_events(events: Iterable[Event], out: TextIO | None = None, verbose: bool = True) -> str:
     """Print events as they arrive and return the final answer text."""
+    out = out or sys.stdout
     final_text = ""
     streamed = False
     for event in events:
@@ -29,7 +30,9 @@ def render_events(events: Iterable[Event], out: TextIO = sys.stdout, verbose: bo
             if event.stop_reason not in ("end_turn",):
                 out.write(f"\n[stopped: {event.stop_reason} after {event.iterations} steps]")
             if verbose:
-                out.write(f"\n[tokens: {event.usage.input_tokens} in, {event.usage.output_tokens} out]")
+                out.write(
+                    f"\n[tokens: {event.usage.input_tokens} in, {event.usage.output_tokens} out]"
+                )
     if streamed or final_text:
         out.write("\n")
     return final_text

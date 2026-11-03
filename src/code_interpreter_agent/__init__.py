@@ -31,6 +31,7 @@ from .providers import (
     MissingCredentialsError,
     OpenAIProvider,
     Provider,
+    ToolCall,
     get_provider,
 )
 from .tools import PythonTool, Tool, ToolRegistry, ToolResult
@@ -54,6 +55,7 @@ __all__ = [
     "SubprocessExecutor",
     "TextDelta",
     "Tool",
+    "ToolCall",
     "ToolCallEvent",
     "ToolRegistry",
     "ToolResult",

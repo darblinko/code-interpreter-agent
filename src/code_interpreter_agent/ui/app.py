@@ -38,7 +38,9 @@ def show_files(agent: Agent, session_id: str, names: tuple[str, ...]) -> None:
         if name.lower().endswith(IMAGE_SUFFIXES):
             st.image(str(path), caption=name)
         else:
-            st.download_button(f"Download {name}", path.read_bytes(), file_name=path.name, key=f"dl-{uuid.uuid4()}")
+            st.download_button(
+                f"Download {name}", path.read_bytes(), file_name=path.name, key=f"dl-{uuid.uuid4()}"
+            )
 
 
 def stream_reply(agent: Agent, session_id: str, prompt: str) -> str:
