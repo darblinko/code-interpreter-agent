@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import ExecResult, Executor
+from .base import ExecResult, Executor, read_workspace_file
 from .docker_executor import DockerExecutor
 from .subprocess_executor import SubprocessExecutor
 
@@ -24,4 +24,5 @@ __all__ = [
     "Executor",
     "SubprocessExecutor",
     "get_executor",
+    "read_workspace_file",
 ]

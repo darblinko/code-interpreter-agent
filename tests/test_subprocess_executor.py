@@ -248,3 +248,17 @@ def test_terminate_kills_the_process_group(tmp_path):
             return
         time.sleep(0.05)
     pytest.fail("a process in the worker's group survived")
+
+
+def test_read_workspace_file_refuses_links_and_large_files(tmp_path):
+    from code_interpreter_agent.executors import read_workspace_file
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "ok.txt").write_bytes(b"ok")
+    (tmp_path / "leak.txt").symlink_to("/etc/passwd")
+    (tmp_path / "etc").symlink_to("/etc")
+    (tmp_path / "big.bin").write_bytes(b"x" * 11)
+    assert read_workspace_file(tmp_path, "sub/ok.txt", 10) == b"ok"
+    for name in ("leak.txt", "etc/passwd", "../x", "/etc/passwd", "big.bin"):
+        with pytest.raises((OSError, ValueError)):
+            read_workspace_file(tmp_path, name, 10)

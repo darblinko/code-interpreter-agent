@@ -17,10 +17,11 @@ from code_interpreter_agent import (
     ToolResultEvent,
     build_agent,
 )
-from code_interpreter_agent.executors import EXECUTOR_NAMES
+from code_interpreter_agent.executors import EXECUTOR_NAMES, read_workspace_file
 from code_interpreter_agent.providers import PROVIDER_NAMES
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg")
+MAX_FILE_BYTES = 25_000_000
 
 
 def make_agent(provider: str, model: str, executor: str) -> Agent | None:
@@ -34,13 +35,25 @@ def make_agent(provider: str, model: str, executor: str) -> Agent | None:
 def show_files(agent: Agent, session_id: str, names: tuple[str, ...]) -> None:
     workspace = agent.executor.workspace_path(session_id)
     for name in names:
-        path = workspace / name
+        try:
+            data = read_workspace_file(workspace, name, MAX_FILE_BYTES)
+        except (OSError, ValueError) as error:
+            st.caption(f"{name} not shown: {error}")
+            continue
         if name.lower().endswith(IMAGE_SUFFIXES):
-            st.image(str(path), caption=name)
+            st.image(data, caption=name)
         else:
             st.download_button(
-                f"Download {name}", path.read_bytes(), file_name=path.name, key=f"dl-{uuid.uuid4()}"
+                f"Download {name}",
+                data,
+                file_name=name.rsplit("/", 1)[-1],
+                key=f"dl-{uuid.uuid4()}",
             )
+
+
+def close_agent(agent: Agent | None) -> None:
+    if agent is not None and agent.executor is not None:
+        agent.executor.close()
 
 
 def stream_reply(agent: Agent, session_id: str, prompt: str) -> str:
@@ -62,6 +75,8 @@ def stream_reply(agent: Agent, session_id: str, prompt: str) -> str:
                 show_files(agent, session_id, event.result.files)
         elif isinstance(event, FinalEvent):
             answer = event.text
+            if answer and not text and event.stop_reason in ("end_turn", "max_tokens"):
+                text_box.markdown(answer)
             if event.stop_reason != "end_turn":
                 st.warning(f"Stopped: {event.stop_reason} after {event.iterations} steps")
     return answer
@@ -75,6 +90,7 @@ def main() -> None:
         model = st.text_input("Model (blank for default)")
         executor = st.selectbox("Executor", EXECUTOR_NAMES)
         if st.button("Apply and reset session"):
+            close_agent(st.session_state.get("agent"))
             st.session_state.clear()
     if "session_id" not in st.session_state:
         st.session_state.session_id = f"ui-{uuid.uuid4().hex[:8]}"
