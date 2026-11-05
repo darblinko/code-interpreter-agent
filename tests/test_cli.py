@@ -1,4 +1,4 @@
-from code_interpreter_agent import FakeProvider, build_agent
+from code_interpreter_agent import FakeProvider, FinalEvent, TextDelta, build_agent
 from code_interpreter_agent.cli.main import main
 from code_interpreter_agent.providers import code_turn, text_turn
 
@@ -29,6 +29,33 @@ def test_repl_commands(monkeypatch, capsys, tmp_path):
     main([], agent_factory=factory_with(script, tmp_path))
     out = capsys.readouterr().out
     assert "a.txt" in out and "Session reset." in out and "(no files)" in out
+
+
+def test_files_are_kept_after_exit(capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    script = [code_turn("open('parabola.png', 'wb').write(b'png')"), text_turn("saved")]
+
+    def factory(args):
+        assert args.workspace_root == ".cia-workspaces"
+        return build_agent(
+            FakeProvider(script), executor_options={"workspace_root": args.workspace_root}
+        )
+
+    main(["-p", "plot"], agent_factory=factory)
+    saved = list((tmp_path / ".cia-workspaces").glob("cli-*/parabola.png"))
+    assert len(saved) == 1 and saved[0].read_bytes() == b"png"
+    assert "Files from this session are in" in capsys.readouterr().out
+
+
+def test_unstreamed_final_text_is_printed(capsys):
+    from code_interpreter_agent.cli.render import render_events
+    from code_interpreter_agent.providers.base import Usage
+
+    final = FinalEvent("42", "end_turn", 1, Usage())
+    render_events([final], verbose=False)
+    assert capsys.readouterr().out == "42\n"
+    render_events([TextDelta("42"), final], verbose=False)
+    assert capsys.readouterr().out == "42\n"
 
 
 def test_missing_key_exits_with_error(monkeypatch, capsys):

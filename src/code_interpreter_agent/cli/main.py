@@ -14,6 +14,7 @@ from ..providers import PROVIDER_NAMES, MissingCredentialsError
 from .render import render_events
 
 HELP = "Commands: /reset clears the conversation and workspace, /files lists files, /exit quits."
+DEFAULT_WORKSPACE_ROOT = ".cia-workspaces"
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -22,7 +23,11 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--provider", choices=PROVIDER_NAMES, default="anthropic")
     parser.add_argument("--model", help="model id; defaults come from the provider")
     parser.add_argument("--executor", choices=EXECUTOR_NAMES, default="subprocess")
-    parser.add_argument("--workspace-root", help="directory for session workspaces")
+    parser.add_argument(
+        "--workspace-root",
+        default=DEFAULT_WORKSPACE_ROOT,
+        help="directory for session workspaces, kept after exit (default: %(default)s)",
+    )
     parser.add_argument("--docker-image", help="image for the docker executor")
     parser.add_argument("--timeout", type=float, default=30.0, help="seconds per code call")
     parser.add_argument("--memory-mb", type=int, default=2048)
@@ -33,9 +38,11 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def agent_from_args(args: argparse.Namespace) -> Agent:
-    options: dict = {"timeout_s": args.timeout, "memory_mb": args.memory_mb}
-    if args.workspace_root:
-        options["workspace_root"] = args.workspace_root
+    options: dict = {
+        "timeout_s": args.timeout,
+        "memory_mb": args.memory_mb,
+        "workspace_root": args.workspace_root,
+    }
     if args.executor == "docker" and args.docker_image:
         options["image"] = args.docker_image
     return build_agent(
@@ -90,8 +97,15 @@ def main(
         print()
     finally:
         if agent.executor is not None:
+            report_files(agent, session_id)
             agent.executor.close()
     return 0
+
+
+def report_files(agent: Agent, session_id: str) -> None:
+    workspace = agent.executor.workspace_path(session_id)
+    if any(not p.name.startswith(".") for p in workspace.iterdir()):
+        print(f"Files from this session are in {workspace}")
 
 
 if __name__ == "__main__":
