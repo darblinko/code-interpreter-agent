@@ -1,18 +1,27 @@
 # code-interpreter-agent
 
 A small agent that writes Python, runs it in an isolated worker process, reads the result, and
-repeats until it can answer. About 1,700 lines of library code including the CLI and UI, no agent framework, Python 3.11+.
+repeats until it can answer. About 1,950 lines of library code including the CLI and UI, no
+agent framework, Python 3.11+.
 
 The loop, the model providers, the executors and the tools are separate modules behind small
 interfaces, so each can be replaced or reused alone.
 
 ## Quick start
 
-    uv sync
-    export ANTHROPIC_API_KEY=...            # or OPENAI_API_KEY
+    uv sync --extra anthropic
+    export ANTHROPIC_API_KEY=...
     uv run cia                              # interactive REPL
     uv run cia -p "Plot y = x**2 for x in 0..10 and save it as parabola.png"
+
+With OpenAI:
+
+    uv sync --extra openai
+    export OPENAI_API_KEY=...
     uv run cia --provider openai --model gpt-5
+
+The CLI keeps each session's files in `./.cia-workspaces/<session id>/` and prints that path on
+exit when the session wrote files. `--workspace-root` changes the location.
 
 No key is needed for the examples, the tests, or the scripted demos:
 
@@ -21,8 +30,8 @@ No key is needed for the examples, the tests, or the scripted demos:
     uv run pytest
 
 Optional extras: `anthropic` and `openai` (provider SDKs), `ui` (Streamlit), `examples`
-(matplotlib). The provider SDKs are not installed by default, so install the one you use, for
-example `uv sync --extra anthropic`.
+(matplotlib). The provider SDKs are not installed by default. `uv sync` also installs the dev
+group, which includes matplotlib and numpy.
 
 Demo UI: `uv sync --extra ui --extra anthropic` then
 `uv run streamlit run src/code_interpreter_agent/ui/app.py`.
@@ -159,12 +168,16 @@ this repository; set `OPENAI_MODEL` to a model your account can use.
 | | `subprocess` (default) | `docker` |
 |---|---|---|
 | Isolation | Separate process, rlimits, audit hook | Container |
-| Network | Allowed | Off (`--network none`) |
-| Filesystem | Reads and writes confined to the workspace by an audit hook; read access to the Python installation | Read-only root, writable workspace mount and 128 MB `/tmp` tmpfs |
+| Network | Host network: Internet, LAN, services on the host's localhost, Unix sockets the user can open | Loopback only (`--network none`); the `network` argument overrides it |
+| Filesystem | Reads and writes confined to the workspace by an audit hook; read access to the Python installation | Read-only root, writable workspace mount and 128 MB `/tmp` tmpfs. No audit hook: subprocesses and reads anywhere in the container are allowed |
 | Memory | `RLIMIT_AS`, default 2048 MB | cgroup `--memory`, same value, no swap |
-| CPU | `RLIMIT_CPU` per call (default 30 s) | same, plus `--cpus 1` |
+| CPU | `RLIMIT_CPU` soft limit per call (default 30 s) | same, plus `--cpus 1` |
 | Other | wall clock timeout (30 s), file size cap 256 MB | `--pids-limit 128`, `--cap-drop ALL`, `no-new-privileges`, host uid |
-| Environment | Minimal, no inherited variables | Only variables set by the executor |
+| Environment | 8 fixed variables, nothing inherited | Variables defined in the image, plus `HOME`, `TMPDIR`, `MPLCONFIGDIR` and `MPLBACKEND` set by the executor |
+
+The wall clock timeout is enforced by the parent process and is the limit to rely on. The CPU
+soft limit is set inside the worker; code that ignores `SIGXCPU` runs on until the wall clock
+timeout.
 
 Both keep one long-lived worker per session, so variables persist across calls. A timeout, CPU
 limit or crash discards that session's interpreter state; the next call starts a fresh worker and
@@ -181,30 +194,48 @@ What the subprocess executor does:
   limits and a wall-clock timeout.
 * Starts the worker with an environment of 8 fixed variables. API keys in the parent
   environment are not visible to executed code.
-* Installs a Python audit hook that raises `PermissionError` for `open`, `os.listdir`,
-  `os.scandir`, `os.chdir`, `shutil` copy and move calls and similar events whose path resolves
-  (symlinks included) outside the session workspace and the Python installation, and for process
-  creation (`subprocess`, `os.system`, `os.exec*`, `os.fork`, `posix_spawn`, `ctypes.dlopen`).
-* Keeps interpreter namespaces and workspaces per session. Nothing is process-global.
+* Installs a Python audit hook that raises `PermissionError` for reads (`open`, `os.listdir`,
+  `os.scandir`, `os.chdir`) whose path resolves, symlinks included, outside the session
+  workspace and the Python installation; for writes and changes (`open` for writing,
+  `os.remove`, `os.rename`, `os.link`, `os.chmod`, `os.utime`, `shutil` copy, move and rmtree
+  targets) whose path resolves outside the workspace; for process creation (`subprocess`,
+  `os.system`, `os.exec*`, `os.fork`, `posix_spawn`, `ctypes.dlopen`); for signals
+  (`os.kill`, `os.killpg`); and for `resource.setrlimit`.
+* Caps captured stdout and stderr at `max_output_chars` (default 20,000) per stream inside the
+  worker, and rejects protocol lines over a fixed size, so large output does not reach the
+  parent process.
+* Tags each request with an id and discards the worker if a reply is malformed or answers a
+  different request, for example after code writes to the protocol pipe.
+* Kills the worker's process group on timeout, reset and close.
+* Keeps interpreter namespaces and workspaces per session. Nothing is process-global. Only
+  regular files are reported as created files; symbolic links are skipped.
 
 What it does not do:
 
-* The audit hook runs inside the process it restricts. Code using a native extension, or a bug
-  in the interpreter, can bypass it. Treat it as a guard against mistakes by the model, not
-  against a determined attacker.
+* The audit hook runs inside the process it restricts. Ordinary Python can defeat it, for
+  example by finding the hook function with `gc` and changing its closure, and so can a native
+  extension or an interpreter bug. Treat it as a guard against mistakes by the model, not
+  against a determined attacker. Use the docker executor, on an isolated host, for untrusted
+  input.
+* Processes that leave the worker's process group (a new session or a double fork after a hook
+  bypass) are not killed on timeout or close.
 * No network isolation. Executed code can open sockets and send workspace data out.
 * Metadata calls such as `os.stat` and `os.path.exists` raise no audit event, so existence of
   files outside the workspace can be probed.
 * Read access to the Python installation and a few system paths (fonts, `/proc/self`) is allowed
   because imports need it.
 * Memory is limited by address space, which also counts mapped but unused memory. Numeric
-  libraries can fail under small limits (below about 512 MB with numpy).
+  libraries can fail under small limits: with numpy 2.5.4 on Python 3.13.5, importing numpy and
+  summing a 1000 x 1000 array failed at 128 MB and passed at 192 MB.
 * No limit on disk use beyond the 256 MB per-file cap.
 
 The docker executor adds a kernel-enforced boundary: no network by default, read-only root,
 capabilities dropped, memory and pid limits. It shares the host kernel, so it is not equivalent
 to a virtual machine. For untrusted users, run it on a host or in a service that is itself
-isolated and keep the network off.
+isolated and keep the network off. Code in the container controls the workspace mount, so it
+can create symbolic links there that point at host paths. The executor never reports links as
+files, and `read_workspace_file` (used by the Streamlit app) opens files without following
+links in any path component; host code that opens workspace files by name should do the same.
 
 The tool output is returned to the model. File contents the model prints become part of the
 conversation sent to the provider.
@@ -212,15 +243,17 @@ conversation sent to the provider.
 ## Extending
 
 **Add a provider.** Implement `stream(*, system, messages, tools)` as a generator that yields
-`TextChunk` items and ends with one `Completion(text, tool_calls, usage, stop_reason)`. Convert
-from the content-block message layout inside the provider. Register it in
+`TextChunk` items and ends with one `Completion(text, tool_calls, usage, stop_reason, content)`.
+Set `content` to the provider's own assistant blocks when they must be sent back unchanged (the
+Anthropic provider does this for thinking blocks). Convert from the content-block message layout
+inside the provider and skip block types the provider does not use. Register it in
 `providers/__init__.py:get_provider` if the CLI should offer it. `providers/openai.py` is the
 reference for a non-Anthropic wire format.
 
 **Add an executor.** Implement the four `Executor` methods. For a worker-per-session backend,
 subclass `executors.process.WorkerExecutor`, implement `_spawn(session_id, workspace)` to start a
-process that speaks the `worker.py` protocol (and optionally `_terminate`). `DockerExecutor` is
-about 90 lines.
+process that speaks the `worker.py` protocol (and optionally `_terminate` and
+`_startup_details`). `docker_executor.py` is 109 lines.
 
 **Add a tool.**
 
@@ -245,14 +278,18 @@ Exceptions raised by a tool are returned to the model as error results.
 
 ## Tests
 
-    uv run pytest                                   # offline, about 15 s
+    uv run pytest                                   # offline
     CIA_DOCKER_TESTS=1 CIA_DOCKER_IMAGE=<image> uv run pytest tests/test_docker_executor.py
     CIA_LIVE_TESTS=1 ANTHROPIC_API_KEY=... uv run pytest -m live
 
 The default run uses `FakeProvider` and the real subprocess executor. It covers timeout, CPU and
-memory limits, state persistence, session isolation, reads and writes outside the workspace,
-environment leakage, the agent loop limits, both provider adapters against stub clients, the CLI,
-the Streamlit app through `streamlit.testing`, and all five examples.
+memory limits, state persistence, session isolation, reads, writes and changes outside the
+workspace, worker protocol validation and output limits, environment leakage, the agent loop
+limits and early stops, both provider adapters against stub clients (including Anthropic
+thinking blocks), the CLI, the Streamlit app through `streamlit.testing`, and all five examples.
+On 2026-11-05 it reported 95 passed and 3 skipped (the two live tests and the Docker round trip)
+in 23.6 s on a 6-core WSL2 machine. With `CIA_DOCKER_TESTS=1` and `python:3.12-slim`, the 8
+Docker tests passed.
 
 ## Examples
 

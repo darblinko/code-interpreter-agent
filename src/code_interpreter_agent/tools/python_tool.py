@@ -12,8 +12,9 @@ DESCRIPTION = (
     "between calls in the same session. The working directory is the session workspace: read "
     "input files from it and save outputs (charts, CSV, text) into it. Use print() to see "
     "values; the value of a final bare expression is also printed. Errors are returned as "
-    "tracebacks so you can fix the code and retry. Subprocesses, access to paths outside the "
-    "workspace, and calls longer than the time limit are refused."
+    "tracebacks so you can fix the code and retry. Calls longer than the time limit are "
+    "stopped. Depending on the executor, subprocesses, network access and paths outside the "
+    "workspace may be refused."
 )
 
 
