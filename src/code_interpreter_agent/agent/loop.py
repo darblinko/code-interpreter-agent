@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 
 from ..executors.base import Executor
-from ..providers.base import Completion, Message, Provider, TextChunk, Usage
+from ..providers.base import Completion, Message, Provider, TextChunk, ToolCall, Usage
 from ..tools.base import Tool, ToolRegistry
 from ..tools.python_tool import PythonTool
 from .events import Event, FinalEvent, TextDelta, ToolCallEvent, ToolResultEvent
@@ -62,21 +62,28 @@ class Agent:
                 stop = "max_tokens" if completion.stop_reason == "max_tokens" else "end_turn"
                 yield FinalEvent(completion.text, stop, iteration, usage)
                 return
-            results = []
-            for call in completion.tool_calls:
+            yield from self._run_tools(session_id, completion.tool_calls, history)
+        yield FinalEvent(last_text, "max_iterations", self.max_iterations, usage)
+
+    def _run_tools(
+        self, session_id: str, calls: tuple[ToolCall, ...], history: list[Message]
+    ) -> Iterator[Event]:
+        """Run tool calls and append their results to the history. The results are appended
+        even if the caller stops iterating early, so every tool_use keeps a tool_result and
+        the next request stays valid; calls that did not run get an error result."""
+        results: dict[str, dict] = {}
+        try:
+            for call in calls:
                 yield ToolCallEvent(call)
                 result = self.tools.run(session_id, call.name, call.arguments)
+                results[call.id] = _result_block(call.id, result.content, result.is_error)
                 yield ToolResultEvent(call, result)
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": call.id,
-                        "content": result.content,
-                        "is_error": result.is_error,
-                    }
-                )
-            history.append({"role": "user", "content": results})
-        yield FinalEvent(last_text, "max_iterations", self.max_iterations, usage)
+        finally:
+            blocks = [
+                results.get(call.id) or _result_block(call.id, "Tool call was cancelled.", True)
+                for call in calls
+            ]
+            history.append({"role": "user", "content": blocks})
 
     def _model_turn(self, history: list[Message]) -> Iterator[Event]:
         """Stream one model call, forwarding text deltas. Returns the Completion."""
@@ -91,7 +98,13 @@ class Agent:
         raise RuntimeError("Provider stream ended without a Completion")
 
 
+def _result_block(call_id: str, content: str, is_error: bool) -> dict:
+    return {"type": "tool_result", "tool_use_id": call_id, "content": content, "is_error": is_error}
+
+
 def _assistant_message(completion: Completion) -> Message:
+    if completion.content:
+        return {"role": "assistant", "content": [dict(block) for block in completion.content]}
     blocks: list[dict] = []
     if completion.text:
         blocks.append({"type": "text", "text": completion.text})

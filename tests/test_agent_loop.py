@@ -129,3 +129,44 @@ def test_custom_tool_is_dispatched(executor):
 def test_exhausted_script_raises(executor):
     with pytest.raises(RuntimeError, match="exhausted"):
         run_all(Agent(FakeProvider([]), executor), "s", "x")
+
+
+def test_stopping_after_a_tool_call_keeps_history_valid(executor):
+    provider = FakeProvider([code_turn("print(1)", call_id="c1"), text_turn("done")])
+    agent = Agent(provider, executor)
+    events = agent.run("s", "go")
+    for event in events:
+        if isinstance(event, ToolCallEvent):
+            break
+    events.close()
+    last = agent.history("s")[-1]
+    assert last["role"] == "user"
+    assert last["content"][0]["tool_use_id"] == "c1" and last["content"][0]["is_error"]
+    run_all(agent, "s", "again")
+    assert provider.requests[1][2] == last
+
+
+def test_provider_content_blocks_are_replayed_unchanged(executor):
+    from code_interpreter_agent.providers.base import Completion, ToolCall, Usage
+
+    blocks = (
+        {"type": "thinking", "thinking": "", "signature": "sig-1"},
+        {"type": "tool_use", "id": "t1", "name": "python", "input": {"code": "print(5)"}},
+    )
+    seen = []
+
+    class ThinkingProvider:
+        name, model = "stub", "stub"
+
+        def stream(self, *, system, messages, tools):
+            seen.append([dict(m) for m in messages])
+            if len(seen) == 1:
+                call = ToolCall("t1", "python", {"code": "print(5)"})
+                yield Completion("", (call,), Usage(1, 1), "tool_use", blocks)
+            else:
+                yield Completion("five", (), Usage(1, 1), "end_turn")
+
+    final = run_all(Agent(ThinkingProvider(), executor), "s", "go")[-1]
+    assert final.text == "five"
+    assert seen[1][1] == {"role": "assistant", "content": list(blocks)}
+    assert seen[1][2]["content"][0]["tool_use_id"] == "t1"

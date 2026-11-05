@@ -65,6 +65,8 @@ class AnthropicProvider:
 
 
 def _completion_from_message(message: Any) -> Completion:
+    """Keep every content block as returned. Thinking and redacted_thinking blocks carry
+    signatures that must be sent back unchanged with the tool results that follow them."""
     text_parts: list[str] = []
     calls: list[ToolCall] = []
     for block in message.content:
@@ -73,4 +75,16 @@ def _completion_from_message(message: Any) -> Completion:
         elif block.type == "tool_use":
             calls.append(ToolCall(block.id, block.name, dict(block.input)))
     usage = Usage(message.usage.input_tokens, message.usage.output_tokens)
-    return Completion("".join(text_parts), tuple(calls), usage, message.stop_reason or "end_turn")
+    return Completion(
+        "".join(text_parts),
+        tuple(calls),
+        usage,
+        message.stop_reason or "end_turn",
+        tuple(_block_param(block) for block in message.content),
+    )
+
+
+def _block_param(block: Any) -> dict[str, Any]:
+    if hasattr(block, "model_dump"):
+        return block.model_dump(mode="json", exclude_none=True)
+    return {key: value for key, value in vars(block).items() if value is not None}

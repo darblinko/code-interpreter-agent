@@ -6,8 +6,10 @@ Conversation messages use the Anthropic content-block layout:
     block = {"type": "text", "text": str}
           | {"type": "tool_use", "id": str, "name": str, "input": dict}
           | {"type": "tool_result", "tool_use_id": str, "content": str, "is_error": bool}
+          | any other provider block, such as {"type": "thinking", ...}, kept as returned
 
-Providers that use another wire format convert inside the provider.
+Providers that use another wire format convert inside the provider and skip block types they
+do not understand.
 """
 
 from __future__ import annotations
@@ -62,12 +64,18 @@ class TextChunk:
 
 @dataclass(frozen=True)
 class Completion:
-    """The finished model turn. Always the last item a provider stream yields."""
+    """The finished model turn. Always the last item a provider stream yields.
+
+    `content` optionally holds the assistant content blocks exactly as the provider returned
+    them (for example Anthropic thinking blocks with their signatures). When it is set, the
+    agent stores these blocks in the history instead of rebuilding them from text and tool
+    calls, so the next request replays the turn unchanged."""
 
     text: str = ""
     tool_calls: tuple[ToolCall, ...] = field(default_factory=tuple)
     usage: Usage = field(default_factory=Usage)
     stop_reason: str = "end_turn"
+    content: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
 
 StreamItem = TextChunk | Completion

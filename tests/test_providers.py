@@ -137,3 +137,42 @@ def test_openai_message_conversion():
     assert converted[0]["role"] == "system"
     assert converted[2]["tool_calls"][0]["function"]["arguments"] == json.dumps({"code": "1"})
     assert converted[3] == {"role": "tool", "tool_call_id": "c1", "content": "out"}
+
+
+def test_anthropic_thinking_blocks_are_kept_for_replay():
+    class Stream(FakeAnthropicStream):
+        text_stream = []
+
+        def get_final_message(self):
+            return NS(
+                content=[
+                    NS(type="thinking", thinking="", signature="sig-1"),
+                    NS(type="redacted_thinking", data="opaque"),
+                    NS(type="tool_use", id="tu1", name="python", input={"code": "1"}),
+                ],
+                usage=NS(input_tokens=1, output_tokens=1),
+                stop_reason="tool_use",
+            )
+
+    provider = AnthropicProvider(client=NS(messages=NS(stream=lambda **kwargs: Stream())))
+    done = list(provider.stream(system="s", messages=[], tools=TOOLS))[-1]
+    assert done.content == (
+        {"type": "thinking", "thinking": "", "signature": "sig-1"},
+        {"type": "redacted_thinking", "data": "opaque"},
+        {"type": "tool_use", "id": "tu1", "name": "python", "input": {"code": "1"}},
+    )
+
+
+def test_openai_conversion_skips_thinking_blocks():
+    messages = [
+        {"role": "user", "content": "x"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "", "signature": "s"},
+                {"type": "text", "text": "hi"},
+            ],
+        },
+    ]
+    converted = to_openai_messages("sys", messages)
+    assert converted[-1] == {"role": "assistant", "content": "hi"}
