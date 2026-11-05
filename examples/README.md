@@ -16,7 +16,7 @@ Output files are written to `workspaces/<example>/`. Each example has an offline
 | csv_analysis | sales.csv, 200 rows | Aggregation with csv and collections, no extra packages |
 | plot_chart | temperatures.csv, 60 rows | A matplotlib chart saved as PNG (needs matplotlib) |
 | log_analysis | app.log, about 1500 lines | Regular expressions and counters over text |
-| math_stats | measurements.json, 2 x 40 values | Welch t statistic, confidence interval, p value |
+| math_stats | measurements.json, 2 x 40 values | Welch t statistic, approximate confidence interval and p value (normal approximation) |
 | self_correct | inventory.csv, 30 rows | First attempt raises KeyError, second attempt reads the traceback and fixes the column name |
 
 With `--live`, the real model chooses its own code, so output differs from the scripted run.

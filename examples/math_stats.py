@@ -1,4 +1,6 @@
-"""Statistics problem: compare two samples with a Welch t statistic."""
+"""Statistics problem: compare two samples with a Welch t statistic. The p value and the
+interval use the normal approximation, which the standard library supports; the exact Welch
+t distribution gives p = 0.0005 for this data."""
 
 from __future__ import annotations
 
@@ -36,16 +38,19 @@ t_statistic = (mean_b - mean_a) / standard_error
 p_value = 2 * (1 - NormalDist().cdf(abs(t_statistic)))
 margin = 1.96 * standard_error
 print(f"means: control {mean_a:.2f}, treatment {mean_b:.2f}")
-print(f"difference {mean_b - mean_a:.2f}, 95% CI ({mean_b - mean_a - margin:.2f}, "
+print(f"difference {mean_b - mean_a:.2f}, approximate 95% CI ({mean_b - mean_a - margin:.2f}, "
       f"{mean_b - mean_a + margin:.2f})")
-print(f"t = {t_statistic:.2f}, p = {p_value:.4f}")
+print(f"Welch t = {t_statistic:.2f}, p = {p_value:.4f} (normal approximation)")
 """
 
 
 def script() -> list[TurnSource]:
     return [
         code_turn(ANALYSIS, "I will compute the Welch t statistic and a confidence interval."),
-        text_turn("The treatment mean, the confidence interval and the p value are above."),
+        text_turn(
+            "The treatment mean, the confidence interval and the p value are above. The p value "
+            "and interval use the normal approximation to the t distribution."
+        ),
     ]
 
 

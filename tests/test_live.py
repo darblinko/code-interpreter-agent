@@ -25,4 +25,6 @@ def test_live_arithmetic(provider, key, tmp_path):
         )
     finally:
         agent.executor.close()
+    results = [e.result for e in events if type(e).__name__ == "ToolResultEvent"]
+    assert any("80779853376" in r.content and not r.is_error for r in results)
     assert "80779853376" in events[-1].text.replace(",", "")
