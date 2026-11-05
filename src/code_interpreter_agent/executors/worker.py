@@ -3,10 +3,12 @@ docker executor can mount this single file into a stock Python image.
 
 Protocol: one JSON object per line on stdin and stdout.
     worker -> parent   {"ready": true}
-    parent -> worker   {"code": str, "cpu_s": number}
-    worker -> parent   {"stdout": str, "stderr": str, "ok": bool}
-After startup, file descriptors 0, 1 and 2 point at /dev/null, so user code cannot corrupt the
-protocol by printing; print output is captured in-process.
+    parent -> worker   {"id": str, "code": str, "cpu_s": number, "max_output_chars": int}
+    worker -> parent   {"id": str, "stdout": str, "stderr": str, "ok": bool}
+After startup, file descriptors 0, 1 and 2 point at /dev/null, so printing cannot corrupt the
+protocol; print output is captured in-process, up to max_output_chars per stream. Code that
+writes to the protocol descriptors directly produces a reply the parent rejects, and the parent
+then restarts the worker.
 """
 
 from __future__ import annotations
@@ -32,28 +34,33 @@ BLOCKED_EVENTS = frozenset(
         "os.fork",
         "os.forkpty",
         "ctypes.dlopen",
+        "os.kill",
+        "os.killpg",
     }
 )
+# Event name -> ((argument index, "read" or "write"), ...). A "write" path must resolve inside
+# the workspace; a "read" path may also resolve inside the Python installation.
 PATH_EVENTS = {
-    "os.listdir": (0,),
-    "os.scandir": (0,),
-    "os.chdir": (0,),
-    "os.mkdir": (0,),
-    "os.rmdir": (0,),
-    "os.remove": (0,),
-    "os.rename": (0, 1),
-    "os.link": (0, 1),
-    "os.symlink": (0, 1),
-    "os.chmod": (0,),
-    "os.chown": (0,),
-    "os.truncate": (0,),
-    "shutil.copyfile": (0, 1),
-    "shutil.copymode": (0, 1),
-    "shutil.copystat": (0, 1),
-    "shutil.copytree": (0, 1),
-    "shutil.move": (0, 1),
-    "shutil.rmtree": (0,),
-    "glob.glob": (0,),
+    "os.listdir": ((0, "read"),),
+    "os.scandir": ((0, "read"),),
+    "os.chdir": ((0, "read"),),
+    "glob.glob": ((0, "read"),),
+    "os.mkdir": ((0, "write"),),
+    "os.rmdir": ((0, "write"),),
+    "os.remove": ((0, "write"),),
+    "os.rename": ((0, "write"), (1, "write")),
+    "os.link": ((0, "write"), (1, "write")),
+    "os.symlink": ((0, "read"), (1, "write")),
+    "os.chmod": ((0, "write"),),
+    "os.chown": ((0, "write"),),
+    "os.truncate": ((0, "write"),),
+    "os.utime": ((0, "write"),),
+    "shutil.copyfile": ((0, "read"), (1, "write")),
+    "shutil.copymode": ((0, "read"), (1, "write")),
+    "shutil.copystat": ((0, "read"), (1, "write")),
+    "shutil.copytree": ((0, "read"), (1, "write")),
+    "shutil.move": ((0, "write"), (1, "write")),
+    "shutil.rmtree": ((0, "write"),),
 }
 READ_ONLY_EXTRA_ROOTS = (
     "/usr/share/fonts",
@@ -86,11 +93,18 @@ def _inside(path: str, roots: list[str]) -> bool:
     return any(path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
 
 
+class _LimitGate:
+    """Lets the worker's own setrlimit calls through the audit hook and refuses all others."""
+
+    open = False
+
+
 def install_confinement(workspace: str) -> None:
-    """Install an audit hook that refuses file access outside the workspace and refuses
-    process creation. This is a guardrail, not a security boundary: native code bypasses it."""
-    write_roots = [os.path.realpath(workspace)]
-    read_roots = write_roots + [
+    """Install an audit hook that refuses file access outside the workspace, process creation,
+    signals to other processes and rlimit changes. This is a guardrail against mistakes, not a
+    security boundary: native code and ordinary Python introspection can bypass it."""
+    write_roots = (os.path.realpath(workspace),)
+    read_roots = write_roots + tuple(
         os.path.realpath(p)
         for p in {
             sys.prefix,
@@ -100,7 +114,9 @@ def install_confinement(workspace: str) -> None:
             *[p for p in sys.path if p and os.path.isdir(p)],
             *READ_ONLY_EXTRA_ROOTS,
         }
-    ]
+    )
+    roots_for = {"read": read_roots, "write": write_roots}
+    real, inside, gate = _real, _inside, _LimitGate
     busy = False
 
     def hook(event: str, args: tuple) -> None:
@@ -109,20 +125,22 @@ def install_confinement(workspace: str) -> None:
             return
         if event in BLOCKED_EVENTS:
             raise PermissionError(f"{event} is disabled in this sandbox")
+        if event == "resource.setrlimit" and not gate.open:
+            raise PermissionError("Changing resource limits is disabled in this sandbox")
         if event == "open":
-            path = _real(args[0])
+            path = real(args[0])
             if path is None:
                 return
             writing = isinstance(args[2], int) and args[2] & WRITE_FLAGS
-            if not _inside(path, write_roots if writing else read_roots):
+            if not inside(path, write_roots if writing else read_roots):
                 verb = "write" if writing else "read"
                 raise PermissionError(f"Cannot {verb} outside the workspace: {args[0]!r}")
         elif event in PATH_EVENTS:
             busy = True
             try:
-                for index in PATH_EVENTS[event]:
-                    path = _real(args[index]) if index < len(args) else None
-                    if path is not None and not _inside(path, read_roots):
+                for index, mode in PATH_EVENTS[event]:
+                    path = real(args[index]) if index < len(args) else None
+                    if path is not None and not inside(path, roots_for[mode]):
                         raise PermissionError(f"Path is outside the workspace: {args[index]!r}")
             finally:
                 busy = False
@@ -147,7 +165,38 @@ def set_cpu_budget(seconds: float) -> None:
 
     used = resource.getrusage(resource.RUSAGE_SELF)
     soft = int(used.ru_utime + used.ru_stime) + max(1, math.ceil(seconds))
-    resource.setrlimit(resource.RLIMIT_CPU, (soft, resource.RLIM_INFINITY))
+    _LimitGate.open = True
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU, (soft, resource.RLIM_INFINITY))
+    finally:
+        _LimitGate.open = False
+
+
+class BoundedWriter(io.TextIOBase):
+    """Text sink that keeps the first `limit` characters and counts the rest."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._parts: list[str] = []
+        self._kept = 0
+        self.omitted = 0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        room = self._limit - self._kept
+        if room > 0:
+            self._parts.append(text[:room])
+            self._kept += min(room, len(text))
+        self.omitted += max(0, len(text) - max(room, 0))
+        return len(text)
+
+    def getvalue(self) -> str:
+        text = "".join(self._parts)
+        if self.omitted:
+            text += f"\n... [{self.omitted} characters truncated]"
+        return text
 
 
 def _run_source(code: str, filename: str, namespace: dict) -> None:
@@ -161,10 +210,10 @@ def _run_source(code: str, filename: str, namespace: dict) -> None:
             print(repr(value))
 
 
-def execute(code: str, namespace: dict, cell_number: int) -> dict:
+def execute(code: str, namespace: dict, cell_number: int, max_output_chars: int) -> dict:
     filename = f"<cell {cell_number}>"
     linecache.cache[filename] = (len(code), None, code.splitlines(True), filename)
-    out, err = io.StringIO(), io.StringIO()
+    out, err = BoundedWriter(max_output_chars), BoundedWriter(max_output_chars)
     ok = True
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
@@ -203,7 +252,9 @@ def main(argv: list[str] | None = None) -> None:
     for cell_number, line in enumerate(protocol_in, start=1):
         request = json.loads(line)
         set_cpu_budget(float(request.get("cpu_s", 30)))
-        response = execute(request["code"], namespace, cell_number)
+        limit = int(request.get("max_output_chars", 20_000))
+        response = execute(request["code"], namespace, cell_number, limit)
+        response["id"] = request.get("id")
         protocol_out.write(json.dumps(response) + "\n")
         protocol_out.flush()
 

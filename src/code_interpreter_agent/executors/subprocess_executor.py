@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -53,3 +56,10 @@ class SubprocessExecutor(WorkerExecutor):
             encoding="utf-8",
             start_new_session=True,
         )
+
+    def _terminate(self, session_id: str, process: subprocess.Popen) -> None:
+        """Kill the worker's whole process group. Processes that left the group (a new
+        session or a double fork) are not reached; that needs a container or a cgroup."""
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.kill()

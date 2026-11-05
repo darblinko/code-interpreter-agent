@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class Executor(Protocol):
 
 
 def validate_session_id(session_id: str) -> str:
-    if not SESSION_ID_PATTERN.match(session_id):
+    if not isinstance(session_id, str) or not SESSION_ID_PATTERN.fullmatch(session_id):
         raise ValueError(
             f"Invalid session id {session_id!r}: use 1 to 64 characters from A-Z a-z 0-9 _ . -, "
             "starting with a letter or digit"

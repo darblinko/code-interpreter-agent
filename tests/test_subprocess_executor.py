@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from code_interpreter_agent import SubprocessExecutor
@@ -124,7 +126,7 @@ def test_reset_clears_state_and_files(executor):
 
 
 def test_invalid_session_id_is_rejected(executor):
-    for bad in ("", "../escape", "a/b", ".hidden", "x" * 65):
+    for bad in ("", "../escape", "a/b", ".hidden", "x" * 65, "a\n"):
         with pytest.raises(ValueError):
             executor.run(bad, "1")
 
@@ -155,3 +157,94 @@ def test_close_removes_owned_root():
     executor.run("a", "1")
     executor.close()
     assert not root.exists()
+
+
+def test_protocol_corruption_restarts_worker(executor):
+    executor.run("a", "kept = 1")
+    forged = executor.run("a", "import os; os.write(4, b'not-json\\n'); print(9)")
+    assert not forged.ok and "invalid protocol reply" in forged.stderr
+    result = executor.run("a", "print(999)")
+    assert result.ok and result.stdout == "999\n"
+
+
+def test_reply_with_wrong_id_is_rejected(executor):
+    forged = b'{"id": "x", "stdout": "", "stderr": "", "ok": true}\n'
+    code = f"import os; os.write(4, {forged!r})"
+    result = executor.run("a", code)
+    assert not result.ok and "invalid protocol reply" in result.stderr
+    assert executor.run("a", "print(1)").stdout == "1\n"
+
+
+def test_large_output_is_bounded_in_the_worker(tmp_path):
+    with SubprocessExecutor(workspace_root=tmp_path, max_output_chars=100) as executor:
+        result = executor.run("a", "print('x' * 1_000_000)")
+        assert result.ok
+        assert "[999901 characters truncated]" in result.stdout
+        assert len(result.stdout) < 200
+
+
+def test_oversize_protocol_line_restarts_worker(tmp_path):
+    with SubprocessExecutor(workspace_root=tmp_path, max_output_chars=100) as executor:
+        result = executor.run("a", "import os; os.write(4, b'x' * 200_000)")
+        assert not result.ok and "size limit" in result.stderr
+        assert executor.run("a", "print(2)").stdout == "2\n"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import os, sys; os.remove(os.path.join(sys.prefix, 'pyvenv.cfg'))",
+        "import os, sys; os.chmod(sys.prefix, 0o700)",
+        "import os, sys; os.rename(os.path.join(sys.prefix, 'pyvenv.cfg'), 'cfg')",
+        "import os, sys; os.link(os.path.join(sys.prefix, 'pyvenv.cfg'), 'cfg')",
+        "import os; os.utime('/etc/passwd')",
+    ],
+)
+def test_changes_to_the_python_installation_are_refused(executor, code):
+    result = executor.run("a", code)
+    assert not result.ok and "PermissionError" in result.stderr
+
+
+def test_signals_and_rlimit_changes_are_refused(executor):
+    kill = executor.run("a", "import os; os.kill(os.getppid(), 0)")
+    assert not kill.ok and "PermissionError" in kill.stderr
+    code = "import resource; resource.setrlimit(resource.RLIMIT_CPU, (10**6, 10**6))"
+    limit = executor.run("a", code)
+    assert not limit.ok and "PermissionError" in limit.stderr
+    assert executor.run("a", "print(3)").stdout == "3\n"
+
+
+def test_symlinked_session_workspace_is_rejected(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (tmp_path / "outside").mkdir()
+    (root / "s1").symlink_to(tmp_path / "outside")
+    with SubprocessExecutor(workspace_root=root) as executor, pytest.raises(ValueError):
+        executor.run("s1", "1")
+
+
+def test_symlinks_are_not_reported_as_files(tmp_path):
+    from code_interpreter_agent.executors.process import snapshot_workspace
+
+    (tmp_path / "real.txt").write_text("x")
+    (tmp_path / "leak.txt").symlink_to("/etc/passwd")
+    (tmp_path / "linked_dir").symlink_to("/etc")
+    assert list(snapshot_workspace(tmp_path)) == ["real.txt"]
+
+
+def test_terminate_kills_the_process_group(tmp_path):
+    import os
+    import subprocess
+
+    group = subprocess.Popen(["sh", "-c", "sleep 60 & wait"], start_new_session=True)
+    with SubprocessExecutor(workspace_root=tmp_path) as executor:
+        executor._terminate("a", group)
+    group.wait()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(group.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    pytest.fail("a process in the worker's group survived")
