@@ -171,7 +171,13 @@ class WorkerExecutor(ABC):
         ).start()
         ready = self._read_line(session, self.startup_timeout_s)
         if ready is None or ready == EOF or not _is_ready(ready):
-            return self._discard(session_id, session, "Worker failed to start.")["stderr"]
+            details = self._startup_details(session_id)
+            reason = "Worker failed to start." + (f" {details}" if details else "")
+            return self._discard(session_id, session, reason)["stderr"]
+        return ""
+
+    def _startup_details(self, session_id: str) -> str:
+        """Diagnostic text for a worker that failed to start. Subclasses may override."""
         return ""
 
     def _max_line_chars(self) -> int:

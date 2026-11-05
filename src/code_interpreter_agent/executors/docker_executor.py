@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
+from typing import IO
 
 from .process import WorkerExecutor
 
 WORKER_SCRIPT = Path(__file__).with_name("worker.py")
 CONTAINER_WORKER = "/opt/cia/worker.py"
 DEFAULT_IMAGE = "python:3.12-slim"
+STARTUP_STDERR_CHARS = 2000
 
 
 class DockerExecutor(WorkerExecutor):
@@ -40,6 +43,7 @@ class DockerExecutor(WorkerExecutor):
         self.pids_limit = pids_limit
         self.docker_binary = docker_binary
         self._containers: dict[str, str] = {}
+        self._stderr: dict[str, IO[bytes]] = {}
 
     def build_run_command(self, container_name: str, workspace: Path) -> list[str]:
         memory = f"{self.memory_mb}m"
@@ -70,14 +74,25 @@ class DockerExecutor(WorkerExecutor):
     def _spawn(self, session_id: str, workspace: Path) -> subprocess.Popen:
         name = f"cia-{session_id}-{uuid.uuid4().hex[:8]}"
         self._containers[session_id] = name
+        stderr = tempfile.TemporaryFile()  # noqa: SIM115 closed in _terminate
+        self._stderr[session_id] = stderr
         return subprocess.Popen(
             self.build_run_command(name, workspace),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr,
             text=True,
             encoding="utf-8",
         )
+
+    def _startup_details(self, session_id: str) -> str:
+        """The end of docker's stderr, which names a missing image or a daemon error."""
+        stderr = self._stderr.get(session_id)
+        if stderr is None:
+            return ""
+        stderr.seek(0, os.SEEK_END)
+        stderr.seek(max(0, stderr.tell() - STARTUP_STDERR_CHARS))
+        return stderr.read().decode("utf-8", "replace").strip()
 
     def _terminate(self, session_id: str, process: subprocess.Popen) -> None:
         name = self._containers.pop(session_id, None)
@@ -89,3 +104,6 @@ class DockerExecutor(WorkerExecutor):
                 check=False,
             )
         process.kill()
+        stderr = self._stderr.pop(session_id, None)
+        if stderr is not None:
+            stderr.close()

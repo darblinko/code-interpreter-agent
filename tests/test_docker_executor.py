@@ -69,6 +69,21 @@ def test_docker_roundtrip(tmp_path):
         result = executor.run("d1", "print(value)")
         assert result.ok and result.stdout == "7\n"
         assert (executor.workspace_path("d1") / "f.txt").exists()
-        net = executor.run("d1", "import socket; socket.create_connection(('1.1.1.1', 53), 3)")
-        assert not net.ok
-        assert not executor.run("d1", "open('/etc/x', 'w')").ok
+        interfaces = executor.run("d1", "import os; print(sorted(os.listdir('/sys/class/net')))")
+        assert interfaces.stdout == "['lo']\n"
+        root = executor.run(
+            "d1", "print([l.split()[3] for l in open('/proc/mounts') if l.split()[1] == '/'])"
+        )
+        assert root.stdout.startswith("['ro,") or root.stdout.startswith("['ro']")
+        link = executor.run("d1", "import os; os.symlink('/etc/hostname', 'leak.txt')")
+        assert link.ok and link.files == ()
+
+
+def test_startup_failure_reports_docker_stderr(tmp_path):
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text("#!/bin/sh\necho 'Unable to find image nope:latest' >&2\nexit 125\n")
+    fake_docker.chmod(0o755)
+    with DockerExecutor(workspace_root=tmp_path / "ws", docker_binary=str(fake_docker)) as executor:
+        result = executor.run("d1", "1")
+    assert not result.ok
+    assert "Worker failed to start. Unable to find image nope:latest" in result.stderr
